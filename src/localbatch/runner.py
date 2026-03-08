@@ -96,7 +96,7 @@ class DockerRunner:
 
         image = container_props.get("image", "")
         command = overrides.get("command") or container_props.get("command")
-        env = _merge_env(
+        base_env = _merge_env(
             container_props.get("environment", []),
             overrides.get("environment", []),
         )
@@ -106,82 +106,110 @@ class DockerRunner:
         # job-specific values so that infrastructure URLs (host.docker.internal)
         # always take precedence over whatever the submitter passes (e.g.
         # localhost:9000 on the host vs host.docker.internal:9000 in container).
-        merged = dict(env)
-        merged.update(self.inject_env)
-        env = merged
+        base_env.update(self.inject_env)
 
-        # Inject standard AWS Batch environment variables that real Batch
-        # injects automatically.  Metaflow uses AWS_BATCH_JOB_ATTEMPT to
-        # compute --retry-count (as $((AWS_BATCH_JOB_ATTEMPT-1))), so it
-        # must be ≥ 1 or the arithmetic produces -1 which click rejects.
-        # AWS_BATCH_CE_NAME and AWS_BATCH_JQ_NAME are read by Metaflow's
-        # batch_decorator.task_pre_step to populate run metadata.
-        env.setdefault("AWS_BATCH_JOB_ID", job_id)
-        env.setdefault("AWS_BATCH_JOB_ATTEMPT", "1")
-        env.setdefault("AWS_BATCH_CE_NAME", "localbatch-local")
-        env.setdefault("AWS_BATCH_JQ_NAME", job.get("jobQueue", "localbatch-default"))
-        env.setdefault("AWS_EXECUTION_ENV", "AWS_ECS_EC2")
-
-        # Inject the fake ECS container metadata endpoint so Metaflow can
-        # discover the (synthetic) CloudWatch log stream name.
-        env["ECS_CONTAINER_METADATA_URI_V4"] = (
-            f"http://{self.host_addr}:{self.port}/metadata/{job_id}"
+        # How many times AWS Batch should attempt the job (incl. first attempt).
+        max_attempts = max(
+            1,
+            job.get("retryStrategy", {}).get("attempts", 1),
         )
 
-        container = None
-        try:
-            container = self._client.containers.run(
-                image=image,
-                command=command,
-                environment=env,
-                detach=True,
-                remove=False,
-                # Make the host reachable as host.docker.internal on Linux too
-                extra_hosts={"host.docker.internal": "host-gateway"},
+        for attempt in range(1, max_attempts + 1):
+            env = dict(base_env)
+
+            # Inject standard AWS Batch environment variables that real Batch
+            # injects automatically.  Metaflow uses AWS_BATCH_JOB_ATTEMPT to
+            # compute --retry-count (as $((AWS_BATCH_JOB_ATTEMPT-1))), so it
+            # must be ≥ 1 or the arithmetic produces -1 which click rejects.
+            # AWS_BATCH_CE_NAME and AWS_BATCH_JQ_NAME are read by Metaflow's
+            # batch_decorator.task_pre_step to populate run metadata.
+            env.setdefault("AWS_BATCH_JOB_ID", job_id)
+            env["AWS_BATCH_JOB_ATTEMPT"] = str(attempt)
+            env.setdefault("AWS_BATCH_CE_NAME", "localbatch-local")
+            env.setdefault(
+                "AWS_BATCH_JQ_NAME", job.get("jobQueue", "localbatch-default")
             )
-            self.store.update_job(
-                job_id, status="RUNNING", _container_id=container.id
+            env.setdefault("AWS_EXECUTION_ENV", "AWS_ECS_EC2")
+
+            # Inject the fake ECS container metadata endpoint so Metaflow can
+            # discover the (synthetic) CloudWatch log stream name.
+            env["ECS_CONTAINER_METADATA_URI_V4"] = (
+                f"http://{self.host_addr}:{self.port}/metadata/{job_id}"
             )
 
-            result = container.wait(timeout=7200)
-            exit_code = result.get("StatusCode", -1)
-
-            # Capture container logs for debugging
+            container = None
             try:
-                logs = container.logs(stdout=True, stderr=True, tail=200)
-                log_text = logs.decode("utf-8", errors="replace").strip()
-                if exit_code != 0:
-                    logger.error(
-                        "Job %s failed (exit %d). Container logs:\n%s",
-                        job_id, exit_code, log_text,
+                if attempt > 1:
+                    logger.info(
+                        "Job %s: attempt %d/%d (retrying)",
+                        job_id,
+                        attempt,
+                        max_attempts,
                     )
-                else:
-                    logger.debug("Job %s logs:\n%s", job_id, log_text)
-            except Exception as log_exc:
-                logger.warning("Could not capture logs for %s: %s", job_id, log_exc)
+                    self.store.update_job(job_id, status="RUNNING")
 
-            if exit_code == 0:
-                self.store.update_job(
-                    job_id, status="SUCCEEDED", stoppedAt=_now_ms()
+                container = self._client.containers.run(
+                    image=image,
+                    command=command,
+                    environment=env,
+                    detach=True,
+                    remove=False,
+                    # Make the host reachable as host.docker.internal on Linux too
+                    extra_hosts={"host.docker.internal": "host-gateway"},
                 )
-            else:
                 self.store.update_job(
-                    job_id,
-                    status="FAILED",
-                    statusReason=f"Container exited with code {exit_code}",
-                    exitCode=exit_code,
-                    stoppedAt=_now_ms(),
+                    job_id, status="RUNNING", _container_id=container.id
                 )
 
-        except Exception as exc:
-            logger.exception("Job %s raised an exception", job_id)
-            self._fail(job_id, str(exc)[:500])
-        finally:
-            if container:
+                result = container.wait(timeout=7200)
+                exit_code = result.get("StatusCode", -1)
+
+                # Capture container logs for debugging
                 try:
-                    container.remove(force=True)
-                except Exception:
-                    pass
+                    logs = container.logs(stdout=True, stderr=True, tail=200)
+                    log_text = logs.decode("utf-8", errors="replace").strip()
+                    if exit_code != 0:
+                        logger.error(
+                            "Job %s attempt %d failed (exit %d). Container logs:\n%s",
+                            job_id,
+                            attempt,
+                            exit_code,
+                            log_text,
+                        )
+                    else:
+                        logger.debug("Job %s logs:\n%s", job_id, log_text)
+                except Exception as log_exc:
+                    logger.warning(
+                        "Could not capture logs for %s: %s", job_id, log_exc
+                    )
+
+                if exit_code == 0:
+                    self.store.update_job(
+                        job_id, status="SUCCEEDED", stoppedAt=_now_ms()
+                    )
+                    return  # success — stop retrying
+                elif attempt < max_attempts:
+                    # More attempts remain; loop back for the next retry.
+                    continue
+                else:
+                    self.store.update_job(
+                        job_id,
+                        status="FAILED",
+                        statusReason=f"Container exited with code {exit_code}",
+                        exitCode=exit_code,
+                        stoppedAt=_now_ms(),
+                    )
+
+            except Exception as exc:
+                logger.exception("Job %s raised an exception", job_id)
+                if attempt >= max_attempts:
+                    self._fail(job_id, str(exc)[:500])
+            finally:
+                if container:
+                    try:
+                        container.remove(force=True)
+                    except Exception:
+                        pass
 
     def _fail(self, job_id: str, reason: str):
         self.store.update_job(
