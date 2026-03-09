@@ -3,7 +3,7 @@
 [![CI](https://github.com/npow/localbatch/actions/workflows/ci.yml/badge.svg)](https://github.com/npow/localbatch/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/localbatch)](https://pypi.org/project/localbatch/)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/) [![Docs](https://img.shields.io/badge/docs-mintlify-18a34a?style=flat-square)](https://mintlify.com/npow/localbatch)
 
 The free AWS Batch emulator that actually runs your containers.
 
