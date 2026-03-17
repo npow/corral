@@ -148,14 +148,23 @@ class DockerRunner:
                     )
                     self.store.update_job(job_id, status="RUNNING")
 
+                # On Linux, host.docker.internal is not set automatically so we
+                # inject it via extra_hosts. On macOS (Darwin), Docker Desktop
+                # and OrbStack already provide host.docker.internal natively and
+                # overriding it with host-gateway maps to the wrong interface.
+                import platform
+                extra_hosts = (
+                    {"host.docker.internal": "host-gateway"}
+                    if platform.system() == "Linux"
+                    else {}
+                )
                 container = self._client.containers.run(
                     image=image,
                     command=command,
                     environment=env,
                     detach=True,
                     remove=False,
-                    # Make the host reachable as host.docker.internal on Linux too
-                    extra_hosts={"host.docker.internal": "host-gateway"},
+                    extra_hosts=extra_hosts,
                 )
                 self.store.update_job(
                     job_id, status="RUNNING", _container_id=container.id
