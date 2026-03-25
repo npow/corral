@@ -4,13 +4,16 @@ build-backend = "hatchling.build"
 
 [project]
 name = "localbatch"
-version = "0.3.0"
+version = "0.4.0"
 description = "Local AWS Batch emulator for integration testing"
-requires-python = ">=3.8"
+requires-python = ">=3.7"
 dependencies = [
-    "fastapi>=0.100.0",
-    "uvicorn[standard]>=0.23.0",
-    "docker>=6.0.0",
+    "fastapi>=0.100.0; python_version >= '3.8'",
+    "fastapi>=0.95.2,<0.100.0; python_version < '3.8'",
+    "uvicorn[standard]>=0.23.0; python_version >= '3.8'",
+    "uvicorn[standard]>=0.17.0,<0.23.0; python_version < '3.8'",
+    "docker>=6.0.0; python_version >= '3.8'",
+    "docker>=5.0.0,<6.0.0; python_version < '3.8'",
     "click>=8.0.0",
 ]
 
